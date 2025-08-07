@@ -12,6 +12,7 @@ const privateKeyPath = path.join(keysPath, 'private.pem');
 let currentPrivateKey = null;
 let previousPrivateKey = null;
 
+// Load and set the private key
 function loadPrivateKey() {
   try {
     const privatePem = fs.readFileSync(privateKeyPath, 'utf8');
@@ -20,21 +21,22 @@ function loadPrivateKey() {
     if (currentPrivateKey) {
       previousPrivateKey = currentPrivateKey; // Backup old key
     }
-    currentPrivateKey = newKey;
 
+    currentPrivateKey = newKey;
     console.log('🔁 Private key reloaded (dual-key ready)');
   } catch (err) {
     console.error('❌ Failed to load private key:', err.message);
   }
 }
 
-// Watch for key changes and hot-reload
+// Watch for private key changes (hot reload)
 fs.watchFile(privateKeyPath, { interval: 1000 }, (curr, prev) => {
   if (curr.mtime !== prev.mtime) {
     loadPrivateKey();
   }
 });
 
+// Try to decrypt with current key, fallback to previous if needed
 function tryDecrypt(payload) {
   const binary = forge.util.decode64(payload);
 
@@ -54,7 +56,8 @@ function tryDecrypt(payload) {
   }
 }
 
-function startWorker() {
+// Start BullMQ worker for decryption
+function startWorker(io) {
   if (!fs.existsSync(privateKeyPath)) {
     console.error('❌ Private key not found. Run setupKeys() first.');
     return;
@@ -62,18 +65,30 @@ function startWorker() {
 
   loadPrivateKey();
 
-  new Worker('sensor-data', async (job) => {
-    const { topic, payload } = job.data;
+  new Worker(
+    'sensor-data',
+    async (job) => {
+      const { topic, payload } = job.data;
 
-    try {
-      const decrypted = tryDecrypt(payload);
-      const data = JSON.parse(decrypted);
-    //   console.log(`✅ Decrypted payload from ${topic}:`, data);
-    console.log(`✅ Decrypted payload from ${topic}:`);
-    } catch (err) {
-      console.error(`❌ Failed to decrypt: ${err.message}`);
-    }
-  }, { connection: redisConnection });
+      try {
+        const decrypted = tryDecrypt(payload);
+        const data = JSON.parse(decrypted);
+
+        console.log(`✅ Decrypted payload from ${topic}:`, data);
+
+        // Emit live data to frontend
+        if (io) {
+          io.emit('sensor-data', {
+            topic,
+            ...data,
+          });
+        }
+      } catch (err) {
+        console.error(`❌ Failed to decrypt: ${err.message}`);
+      }
+    },
+    { connection: redisConnection }
+  );
 
   console.log('🛠️  Decryption worker running with dual-key fallback');
 }
